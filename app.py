@@ -56,25 +56,18 @@ def get_all_contacts(access_token):
         return None
 
 def get_contacts_for_phone(access_token, phone):
-    """
-    Filter contacts matching phone (simulate).
-    Zoho API can be filtered but for now, just get all and find matches.
-    """
     all_contacts = get_all_contacts(access_token)
     if not all_contacts or "data" not in all_contacts:
         return []
 
-    # Simplified matching: check if phone in any phone field
     matched = []
     for contact in all_contacts["data"]:
         phones = []
-        # Zoho fields might be different, try multiple possible phone fields
         for key in ["Phone", "Mobile", "Home_Phone", "Other_Phone"]:
             val = contact.get(key)
             if val:
                 phones.append(val)
 
-        # Basic normalize phone: remove non-digit chars
         normalized_phones = [re.sub(r'\D', '', p) for p in phones]
         normalized_user_phone = re.sub(r'\D', '', phone)
 
@@ -84,25 +77,43 @@ def get_contacts_for_phone(access_token, phone):
             break
     return matched
 
+def create_contact_in_zoho(access_token, name, phone):
+    url = "https://www.zohoapis.in/crm/v2/Contacts"
+    headers = {
+        "Authorization": f"Zoho-oauthtoken {access_token}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "data": [
+            {
+                "Last_Name": name or "New User",
+                "Mobile": phone
+            }
+        ]
+    }
+    resp = requests.post(url, headers=headers, json=data)
+    if resp.status_code in [200, 201, 202]:
+        print(f"✅ New contact created for {phone}")
+    else:
+        print(f"❌ Failed to create contact: {resp.text}")
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     sender = request.values.get('From', '')  # e.g. 'whatsapp:+919876543210'
     incoming_msg = request.values.get('Body', '').strip()
-
-    # Normalize sender phone number just for keying session
     phone_key = sender.lower()
-
     print(f"\n📩 Incoming from {sender}: {incoming_msg}")
-
     resp = MessagingResponse()
-
-    # Get user session state or default
     state = user_sessions.get(phone_key, "START")
 
-    # State machine handling
     if state == "START":
-        # Check greetings to show main menu
         if incoming_msg.lower() in ['hi', 'hello', 'hey']:
+            access_token = get_access_token()
+            if access_token:
+                existing = get_contacts_for_phone(access_token, sender)
+                if not existing:
+                    # Save number in Zoho CRM as new contact
+                    create_contact_in_zoho(access_token, "WhatsApp User", sender)
             user_sessions[phone_key] = "AWAITING_OPTION"
             resp.message(
                 "Welcome! Please select an option by replying with the number:\n"
@@ -110,13 +121,11 @@ def webhook():
             )
             return str(resp)
         else:
-            # Prompt to say hi to start
             resp.message("Please say 'Hi' to start the service.")
             return str(resp)
 
     elif state == "AWAITING_OPTION":
         if incoming_msg == "1":
-            # Show user's own data
             access_token = get_access_token()
             if not access_token:
                 resp.message("Sorry, error connecting to CRM. Please try later.")
@@ -129,21 +138,19 @@ def webhook():
                 for c in contacts[:10]:
                     name = c.get("Full_Name") or c.get("Last_Name") or "No Name"
                     email = c.get("Email") or "No Email"
-                    message_lines.append(f"{name} - {email}")
+                    number = c.get("Mobile") or c.get("Phone") or "No Number"
+                    message_lines.append(f"{name} - {email} - 📱 {number}")
                 resp.message("Your Data:\n" + "\n".join(message_lines))
             else:
-                # Show saved data if no Zoho contact found
                 saved = user_data_store.get(phone_key)
                 if saved and saved.get("name"):
-                    resp.message(f"Your saved data:\nName: {saved['name']}")
+                    resp.message(f"Your saved data:\nName: {saved['name']}\nNumber: {sender}")
                 else:
                     resp.message("No contact data found for your number and no saved data.")
-
             user_sessions[phone_key] = "START"
             return str(resp)
 
         elif incoming_msg == "2":
-            # Show full data (first 10 contacts)
             access_token = get_access_token()
             if not access_token:
                 resp.message("Sorry, error connecting to CRM. Please try later.")
@@ -158,19 +165,15 @@ def webhook():
                     name = c.get("Full_Name") or c.get("Last_Name") or "No Name"
                     email = c.get("Email") or "No Email"
                     message_lines.append(f"{name} - {email}")
-
                 if len(contact_list) > 10:
                     message_lines.append(f"...and {len(contact_list) - 10} more contacts.")
-
                 resp.message("Full Data:\n" + "\n".join(message_lines))
             else:
                 resp.message("No contacts found or error retrieving data.")
-
             user_sessions[phone_key] = "START"
             return str(resp)
 
         elif incoming_msg == "3":
-            # Start Save My Data flow
             user_sessions[phone_key] = "AWAITING_NAME"
             resp.message("Please enter your full name:")
             return str(resp)
@@ -180,7 +183,6 @@ def webhook():
             return str(resp)
 
     elif state == "AWAITING_NAME":
-        # Validate name input (simple validation: letters and spaces only, min length 2)
         if re.match(r"^[A-Za-z ]{2,50}$", incoming_msg):
             user_data_store[phone_key] = {"name": incoming_msg.strip()}
             user_sessions[phone_key] = "START"
@@ -190,22 +192,15 @@ def webhook():
         return str(resp)
 
     else:
-        # Reset session on unknown state
         user_sessions[phone_key] = "START"
         resp.message("Session reset. Please say 'Hi' to start again.")
         return str(resp)
 
-
 if __name__ == "__main__":
-    # Optional: test Zoho API on startup
     access_token = get_access_token()
     if access_token:
-        # You can comment this out if too verbose
         pass
-        # get_all_documents(access_token)
     else:
         print("❌ Failed to fetch documents at startup due to access token issue.")
-
     port = int(os.environ.get("PORT", 5000))
-    # Run Flask on 0.0.0.0 and PORT (as required by Render)
     app.run(host="0.0.0.0", port=port)
