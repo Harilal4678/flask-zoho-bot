@@ -3,6 +3,7 @@ import requests
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
 import os
+import re
 
 app = Flask(__name__)
 print("✅ Flask server started")
@@ -17,6 +18,11 @@ TWILIO_ACCOUNT_SID = "YOUR_TWILIO_ACCOUNT_SID"
 TWILIO_AUTH_TOKEN = "YOUR_TWILIO_AUTH_TOKEN"
 
 twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+# Simple in-memory user session store: phone -> state
+user_sessions = {}
+# Simple in-memory user saved data: phone -> {"name": str}
+user_data_store = {}
 
 @app.route('/')
 def health():
@@ -49,72 +55,154 @@ def get_all_contacts(access_token):
         print(f"❌ Zoho contacts error: {resp.text}")
         return None
 
-def get_all_documents(access_token):
-    url = "https://www.zohoapis.in/crm/v2/Leads"
-    headers = {"Authorization": f"Zoho-oauthtoken {access_token}"}
-    resp = requests.get(url, headers=headers)
-    if resp.status_code == 200:
-        print("✅ Leads fetched (as placeholder for documents)")
-        leads = resp.json().get("data", [])
-        for lead in leads:
-            name = lead.get("Full_Name") or lead.get("Last_Name") or "No Name"
-            email = lead.get("Email", "No Email")
-            print(f"- {name} | {email}")
-    else:
-        print(f"❌ Error fetching leads: {resp.text}")
+def get_contacts_for_phone(access_token, phone):
+    """
+    Filter contacts matching phone (simulate).
+    Zoho API can be filtered but for now, just get all and find matches.
+    """
+    all_contacts = get_all_contacts(access_token)
+    if not all_contacts or "data" not in all_contacts:
+        return []
+
+    # Simplified matching: check if phone in any phone field
+    matched = []
+    for contact in all_contacts["data"]:
+        phones = []
+        # Zoho fields might be different, try multiple possible phone fields
+        for key in ["Phone", "Mobile", "Home_Phone", "Other_Phone"]:
+            val = contact.get(key)
+            if val:
+                phones.append(val)
+
+        # Basic normalize phone: remove non-digit chars
+        normalized_phones = [re.sub(r'\D', '', p) for p in phones]
+        normalized_user_phone = re.sub(r'\D', '', phone)
+
+        if any(normalized_user_phone.endswith(p[-10:]) for p in normalized_phones):
+            matched.append(contact)
+        if len(matched) >= 10:
+            break
+    return matched
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     sender = request.values.get('From', '')  # e.g. 'whatsapp:+919876543210'
-    incoming_msg = request.values.get('Body', '').strip().lower()
+    incoming_msg = request.values.get('Body', '').strip()
+
+    # Normalize sender phone number just for keying session
+    phone_key = sender.lower()
 
     print(f"\n📩 Incoming from {sender}: {incoming_msg}")
 
     resp = MessagingResponse()
 
-    if incoming_msg in ['hi', 'hello', 'hey']:
-        resp.message(
-            "Hello! What service do you need? Please reply with the number:\n"
-            "1. Life Insurance\n2. Health Insurance\n3. Car Insurance"
-        )
-        print("✅ Twilio response sent successfully")
-        return str(resp)
+    # Get user session state or default
+    state = user_sessions.get(phone_key, "START")
 
-    if incoming_msg in ['1', '2', '3']:
-        access_token = get_access_token()
-        if not access_token:
-            resp.message("Sorry, there was an error connecting to CRM. Please try again later.")
-            print("✅ Twilio response sent successfully (CRM error fallback)")
+    # State machine handling
+    if state == "START":
+        # Check greetings to show main menu
+        if incoming_msg.lower() in ['hi', 'hello', 'hey']:
+            user_sessions[phone_key] = "AWAITING_OPTION"
+            resp.message(
+                "Welcome! Please select an option by replying with the number:\n"
+                "1. My Data\n2. Full Data\n3. Save My Data"
+            )
+            return str(resp)
+        else:
+            # Prompt to say hi to start
+            resp.message("Please say 'Hi' to start the service.")
             return str(resp)
 
-        contacts_data = get_all_contacts(access_token)
-        if contacts_data and "data" in contacts_data:
-            contact_list = contacts_data["data"]
-            message_lines = []
-            for c in contact_list[:10]:
-                name = c.get("Full_Name") or c.get("Last_Name") or "No Name"
-                email = c.get("Email") or "No Email"
-                message_lines.append(f"{name} - {email}")
+    elif state == "AWAITING_OPTION":
+        if incoming_msg == "1":
+            # Show user's own data
+            access_token = get_access_token()
+            if not access_token:
+                resp.message("Sorry, error connecting to CRM. Please try later.")
+                user_sessions[phone_key] = "START"
+                return str(resp)
 
-            if len(contact_list) > 10:
-                message_lines.append(f"...and {len(contact_list) - 10} more contacts.")
+            contacts = get_contacts_for_phone(access_token, sender)
+            if contacts:
+                message_lines = []
+                for c in contacts[:10]:
+                    name = c.get("Full_Name") or c.get("Last_Name") or "No Name"
+                    email = c.get("Email") or "No Email"
+                    message_lines.append(f"{name} - {email}")
+                resp.message("Your Data:\n" + "\n".join(message_lines))
+            else:
+                # Show saved data if no Zoho contact found
+                saved = user_data_store.get(phone_key)
+                if saved and saved.get("name"):
+                    resp.message(f"Your saved data:\nName: {saved['name']}")
+                else:
+                    resp.message("No contact data found for your number and no saved data.")
 
-            resp.message("Contacts data:\n" + "\n".join(message_lines))
+            user_sessions[phone_key] = "START"
+            return str(resp)
+
+        elif incoming_msg == "2":
+            # Show full data (first 10 contacts)
+            access_token = get_access_token()
+            if not access_token:
+                resp.message("Sorry, error connecting to CRM. Please try later.")
+                user_sessions[phone_key] = "START"
+                return str(resp)
+
+            contacts_data = get_all_contacts(access_token)
+            if contacts_data and "data" in contacts_data:
+                contact_list = contacts_data["data"]
+                message_lines = []
+                for c in contact_list[:10]:
+                    name = c.get("Full_Name") or c.get("Last_Name") or "No Name"
+                    email = c.get("Email") or "No Email"
+                    message_lines.append(f"{name} - {email}")
+
+                if len(contact_list) > 10:
+                    message_lines.append(f"...and {len(contact_list) - 10} more contacts.")
+
+                resp.message("Full Data:\n" + "\n".join(message_lines))
+            else:
+                resp.message("No contacts found or error retrieving data.")
+
+            user_sessions[phone_key] = "START"
+            return str(resp)
+
+        elif incoming_msg == "3":
+            # Start Save My Data flow
+            user_sessions[phone_key] = "AWAITING_NAME"
+            resp.message("Please enter your full name:")
+            return str(resp)
+
         else:
-            resp.message("No contacts found or error retrieving data.")
+            resp.message("Invalid option. Please reply with 1, 2, or 3.")
+            return str(resp)
 
-        print("✅ Twilio response sent successfully (contacts)")
+    elif state == "AWAITING_NAME":
+        # Validate name input (simple validation: letters and spaces only, min length 2)
+        if re.match(r"^[A-Za-z ]{2,50}$", incoming_msg):
+            user_data_store[phone_key] = {"name": incoming_msg.strip()}
+            user_sessions[phone_key] = "START"
+            resp.message(f"Thanks {incoming_msg}! Your data has been saved.")
+        else:
+            resp.message("Invalid name format. Please enter your full name using only letters and spaces.")
         return str(resp)
 
-    resp.message("Sorry, I didn't understand that. Please reply with 'Hi' to start.")
-    print("✅ Twilio response sent successfully (fallback)")
-    return str(resp)
+    else:
+        # Reset session on unknown state
+        user_sessions[phone_key] = "START"
+        resp.message("Session reset. Please say 'Hi' to start again.")
+        return str(resp)
+
 
 if __name__ == "__main__":
     # Optional: test Zoho API on startup
     access_token = get_access_token()
     if access_token:
-        get_all_documents(access_token)
+        # You can comment this out if too verbose
+        pass
+        # get_all_documents(access_token)
     else:
         print("❌ Failed to fetch documents at startup due to access token issue.")
 
