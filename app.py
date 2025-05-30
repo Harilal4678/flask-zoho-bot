@@ -2,18 +2,17 @@ from flask import Flask, request
 import requests
 from twilio.rest import Client
 from twilio.twiml.messaging_response import MessagingResponse
-import json
 import os
 
 app = Flask(__name__)
 print("✅ Flask server started")
 
-# ✅ Zoho credentials (from you)
+# Zoho credentials (keep your values here)
 CLIENT_ID = "1000.OT73L88OF6C9PO1SS47SD0BE97ZJEB"
 CLIENT_SECRET = "a5c2eb75f9fdb5ec968f745881ef305386c1b263a6"
 REFRESH_TOKEN = "1000.c228b6cbdf8c0e94061a85407d52ca12.4d2994982a44af2bb44ecab60ab9838b"
 
-# 🔴 Replace these with your real Twilio credentials
+# Twilio credentials - replace with your real Twilio credentials or env vars
 TWILIO_ACCOUNT_SID = "YOUR_TWILIO_ACCOUNT_SID"
 TWILIO_AUTH_TOKEN = "YOUR_TWILIO_AUTH_TOKEN"
 
@@ -112,6 +111,7 @@ def webhook():
     return str(resp)
 
 if __name__ == "__main__":
+    # Optional: test Zoho API on startup
     access_token = get_access_token()
     if access_token:
         get_all_documents(access_token)
@@ -119,4 +119,5 @@ if __name__ == "__main__":
         print("❌ Failed to fetch documents at startup due to access token issue.")
 
     port = int(os.environ.get("PORT", 5000))
+    # Run Flask on 0.0.0.0 and PORT (as required by Render)
     app.run(host="0.0.0.0", port=port)

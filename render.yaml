@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: zoho-whatsapp-bot
+    runtime: python
+    buildCommand: ""
+    startCommand: "gunicorn app:app"   # Use gunicorn instead of python app.py for production
+    env: python
+    region: oregon
+    plan: free
