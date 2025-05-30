@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: zoho-whatsapp-bot
+    runtime: python
+    buildCommand: ""
+    startCommand: "python app.py"
+    env: python
+    region: oregon
+    plan: free
